@@ -683,37 +683,6 @@ struct janus_plugin_result *janus_recordplay_handle_message(janus_plugin_session
 		response = json_object();
 		json_object_set_new(response, "recordplay", json_string("ok"));
 		goto plugin_response;
-	} else if(!strcasecmp(request_text, "list")) {
-		json_t *list = json_array();
-		JANUS_LOG(LOG_VERB, "Request for the list of recordings\n");
-		/* Return a list of all available recordings */
-		janus_mutex_lock(&recordings_mutex);
-		GHashTableIter iter;
-		gpointer value;
-		g_hash_table_iter_init(&iter, recordings);
-		while (g_hash_table_iter_next(&iter, NULL, &value)) {
-			janus_recordplay_recording *rec = value;
-			if(!g_atomic_int_get(&rec->completed))	/* Ongoing recording, skip */
-				continue;
-			janus_refcount_increase(&rec->ref);
-			json_t *ml = json_object();
-			json_object_set_new(ml, "id", json_integer(rec->id));
-			json_object_set_new(ml, "name", json_string(rec->name));
-			json_object_set_new(ml, "date", json_string(rec->date));
-			json_object_set_new(ml, "audio", rec->arc_file ? json_true() : json_false());
-			if(rec->acodec != JANUS_AUDIOCODEC_NONE)
-				json_object_set_new(ml, "audio_codec", json_string(janus_audiocodec_name(rec->acodec)));
-			if(rec->opusred_pt > 0)
-				json_object_set_new(ml, "audio_red", json_true());
-			janus_refcount_decrease(&rec->ref);
-			json_array_append_new(list, ml);
-		}
-		janus_mutex_unlock(&recordings_mutex);
-		/* Send info back */
-		response = json_object();
-		json_object_set_new(response, "recordplay", json_string("list"));
-		json_object_set_new(response, "list", list);
-		goto plugin_response;
 	} else if(!strcasecmp(request_text, "configure")) {
 		response = json_object();
 		json_object_set_new(response, "recordplay", json_string("configure"));
