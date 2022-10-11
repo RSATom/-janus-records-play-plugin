@@ -676,14 +676,7 @@ struct janus_plugin_result *janus_recordplay_handle_message(janus_plugin_session
 	json_t *request = json_object_get(root, "request");
 	/* Some requests ('create' and 'destroy') can be handled synchronously */
 	const char *request_text = json_string_value(request);
-	if(!strcasecmp(request_text, "update")) {
-		/* Update list of available recordings, scanning the folder again */
-		janus_recordplay_update_recordings_list();
-		/* Send info back */
-		response = json_object();
-		json_object_set_new(response, "recordplay", json_string("ok"));
-		goto plugin_response;
-	} else if(!strcasecmp(request_text, "configure")) {
+	if(!strcasecmp(request_text, "configure")) {
 		response = json_object();
 		json_object_set_new(response, "recordplay", json_string("configure"));
 		json_object_set_new(response, "status", json_string("ok"));
@@ -748,18 +741,10 @@ json_t *janus_recordplay_handle_admin_message(json_t *message) {
 		goto admin_response;
 	json_t *request = json_object_get(message, "request");
 	const char *request_text = json_string_value(request);
-	if(!strcasecmp(request_text, "update")) {
-		/* Update list of available recordings, scanning the folder again */
-		janus_recordplay_update_recordings_list();
-		/* Send info back */
-		response = json_object();
-		json_object_set_new(response, "recordplay", json_string("ok"));
-		goto admin_response;
-	} else {
-		JANUS_LOG(LOG_VERB, "Unknown request '%s'\n", request_text);
-		error_code = JANUS_RECORDPLAY_ERROR_INVALID_REQUEST;
-		g_snprintf(error_cause, 512, "Unknown request '%s'", request_text);
-	}
+
+	JANUS_LOG(LOG_VERB, "Unknown request '%s'\n", request_text);
+	error_code = JANUS_PLAY_ERROR_INVALID_REQUEST;
+	g_snprintf(error_cause, 512, "Unknown request '%s'", request_text);
 
 admin_response:
 		{
