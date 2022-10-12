@@ -32,22 +32,22 @@
 
 /* Plugin methods */
 janus_plugin *create(void);
-int janus_recordplay_init(janus_callbacks *callback, const char *onfig_path);
-void janus_recordplay_destroy(void);
-int janus_recordplay_get_api_compatibility(void);
-int janus_recordplay_get_version(void);
-const char *janus_recordplay_get_version_string(void);
-const char *janus_recordplay_get_description(void);
-const char *janus_recordplay_get_name(void);
-const char *janus_recordplay_get_author(void);
-const char *janus_recordplay_get_package(void);
-void janus_recordplay_create_session(janus_plugin_session *handle, int *error);
-struct janus_plugin_result *janus_recordplay_handle_message(janus_plugin_session *handle, char *transaction, json_t *message, json_t *jsep);
-json_t *janus_recordplay_handle_admin_message(json_t *message);
-void janus_recordplay_setup_media(janus_plugin_session *handle);
-void janus_recordplay_hangup_media(janus_plugin_session *handle);
-void janus_recordplay_destroy_session(janus_plugin_session *handle, int *error);
-json_t *janus_recordplay_query_session(janus_plugin_session *handle);
+static int janus_recordplay_init(janus_callbacks *callback, const char *onfig_path);
+static void janus_recordplay_destroy(void);
+static int janus_recordplay_get_api_compatibility(void);
+static int janus_recordplay_get_version(void);
+static const char *janus_recordplay_get_version_string(void);
+static const char *janus_recordplay_get_description(void);
+static const char *janus_recordplay_get_name(void);
+static const char *janus_recordplay_get_author(void);
+static const char *janus_recordplay_get_package(void);
+static void janus_recordplay_create_session(janus_plugin_session *handle, int *error);
+static struct janus_plugin_result *janus_recordplay_handle_message(janus_plugin_session *handle, char *transaction, json_t *message, json_t *jsep);
+static json_t *janus_recordplay_handle_admin_message(json_t *message);
+static void janus_recordplay_setup_media(janus_plugin_session *handle);
+static void janus_recordplay_hangup_media(janus_plugin_session *handle);
+static void janus_recordplay_destroy_session(janus_plugin_session *handle, int *error);
+static json_t *janus_recordplay_query_session(janus_plugin_session *handle);
 
 /* Plugin setup */
 static janus_plugin janus_recordplay_plugin =
@@ -189,7 +189,7 @@ static void janus_recordplay_recording_free(const janus_refcount *recording_ref)
 
 
 static char *recordings_path = NULL;
-void janus_recordplay_update_recordings_list(void);
+static void janus_recordplay_update_recordings_list(void);
 static void *janus_recordplay_playout_thread(void *data);
 
 /* To make things easier, we use static payload types for viewers (unless it's for G.711 or G.722) */
