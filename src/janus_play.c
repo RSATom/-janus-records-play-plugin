@@ -25,10 +25,10 @@
 /* Plugin information */
 #define JANUS_RECORDPLAY_VERSION			4
 #define JANUS_RECORDPLAY_VERSION_STRING		"0.0.4"
-#define JANUS_RECORDPLAY_DESCRIPTION		"This is a trivial Record&Play plugin for Janus, to record WebRTC sessions and replay them."
-#define JANUS_RECORDPLAY_NAME				"JANUS Record&Play plugin"
-#define JANUS_RECORDPLAY_AUTHOR				"Meetecho s.r.l."
-#define JANUS_RECORDPLAY_PACKAGE			"janus.plugin.recordplay"
+#define JANUS_RECORDPLAY_DESCRIPTION		""
+#define JANUS_RECORDPLAY_NAME				"JANUS Play plugin"
+#define JANUS_RECORDPLAY_AUTHOR			"Meetecho s.r.l. && Sergey Radionov <rsatom@gmail.com>"
+#define JANUS_RECORDPLAY_PACKAGE			"janus.plugin.play"
 
 /* Plugin methods */
 janus_plugin *create(void);
