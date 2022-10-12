@@ -27,6 +27,8 @@ extern "C" {
 #include "../utils.h"
 }
 
+#include "glib_ptr.h"
+
 
 /* Plugin information */
 #define JANUS_PLAY_VERSION			4
@@ -89,7 +91,7 @@ static struct janus_json_parameter request_parameters[] = {
 	{"request", JSON_STRING, JANUS_JSON_PARAM_REQUIRED}
 };
 static struct janus_json_parameter play_parameters[] = {
-	{"id", JSON_INTEGER, JANUS_JSON_PARAM_REQUIRED | JANUS_JSON_PARAM_POSITIVE},
+	{"id", JSON_STRING, JANUS_JSON_PARAM_REQUIRED},
 	{"restart", JANUS_JSON_BOOL, 0}
 };
 
@@ -126,9 +128,7 @@ typedef struct janus_play_frame_packet {
 janus_play_frame_packet *janus_play_get_frames(const char *dir, const char *filename);
 
 typedef struct janus_play_recording {
-	guint64 id;					/* Recording unique ID */
-	char *name;					/* Name of the recording */
-	char *date;					/* Time of the recording */
+	char* id;					/* Recording unique ID */
 	char *arc_file;				/* Audio file name */
 	janus_audiocodec acodec;	/* Codec used for audio, if available */
 	char *afmtp;				/* Audio fmtp, if any */
@@ -137,14 +137,10 @@ typedef struct janus_play_recording {
 	guint8 audiolevel_ext_id;	/* Audio level extmap ID */
 	char *offer;				/* The SDP offer that will be sent to watchers */
 	gboolean e2ee;				/* Whether media in the recording is encrypted, e.g., using Insertable Streams */
-	GList *viewers;				/* List of users watching this recording */
 	volatile gint completed;	/* Whether this recording was completed or still going on */
 	gint destroyed;	/* Whether this recording has been marked as destroyed */
 	janus_refcount ref;			/* Reference counter */
-	janus_mutex mutex;			/* Mutex for this recording */
 } janus_play_recording;
-static GHashTable *recordings = NULL;
-static janus_mutex recordings_mutex = JANUS_MUTEX_INITIALIZER;
 
 typedef struct janus_play_session {
 	janus_plugin_session *handle;
@@ -185,8 +181,7 @@ static void janus_play_recording_destroy(janus_play_recording *recording) {
 static void janus_play_recording_free(const janus_refcount *recording_ref) {
 	janus_play_recording *recording = janus_refcount_containerof(recording_ref, janus_play_recording, ref);
 	/* This recording can be destroyed, free all the resources */
-	g_free(recording->name);
-	g_free(recording->date);
+	g_free(recording->id);
 	g_free(recording->arc_file);
 	g_free(recording->afmtp);
 	g_free(recording->offer);
@@ -195,27 +190,43 @@ static void janus_play_recording_free(const janus_refcount *recording_ref) {
 
 
 static char *recordings_path = NULL;
-static void janus_play_update_recordings_list(void);
 static void *janus_play_playout_thread(void *data);
 
 /* To make things easier, we use static payload types for viewers (unless it's for G.711 or G.722) */
 #define AUDIO_PT		111
 
+static gchar_ptr build_recording_file_path(const char* recordings_dir, const char* id) {
+	if(!recordings_dir || !id)
+		return nullptr;
+
+	if(!g_path_is_absolute(recordings_dir)) {
+		JANUS_LOG(LOG_ERR, "Recordings path is not absolute: %s.\n", recordings_dir);
+		return nullptr;
+	}
+
+	gchar_ptr mjr_file(g_strconcat(id, ".mjr", nullptr));
+	gchar_ptr full_path(g_build_filename(recordings_dir, mjr_file.get(), nullptr));
+	gchar_ptr safe_path(g_canonicalize_filename(full_path.get(), nullptr));
+
+	if(!g_str_has_prefix(safe_path.get(), recordings_dir)) {
+		JANUS_LOG(LOG_ERR, "Recording path escape detected: %s.\n", id);
+		return nullptr;
+	}
+
+	return safe_path;
+}
+
 /* Helper method to check which codec was used in a specific recording (and if it's end-to-end encrypted) */
-static const char *janus_play_parse_codec(const char *dir, const char *filename, char *fmtp, size_t fmtplen,
+static const char *janus_play_parse_codec(const char *filename, char *fmtp, size_t fmtplen,
 		uint8_t *audiolevel_ext_id, int *opusred_pt, gboolean *e2ee) {
-	if(dir == NULL || filename == NULL)
+	if(filename == NULL)
 		return NULL;
 	if(e2ee)
 		*e2ee = FALSE;
-	char source[1024];
-	if(strstr(filename, ".mjr"))
-		g_snprintf(source, 1024, "%s/%s", dir, filename);
-	else
-		g_snprintf(source, 1024, "%s/%s.mjr", dir, filename);
-	FILE *file = fopen(source, "rb");
+
+	FILE *file = fopen(filename, "rb");
 	if(file == NULL) {
-		JANUS_LOG(LOG_ERR, "Could not open file %s\n", source);
+		JANUS_LOG(LOG_ERR, "Could not open file %s\n", filename);
 		return NULL;
 	}
 	fseek(file, 0L, SEEK_END);
@@ -223,7 +234,7 @@ static const char *janus_play_parse_codec(const char *dir, const char *filename,
 	fseek(file, 0L, SEEK_SET);
 
 	/* Pre-parse */
-	JANUS_LOG(LOG_VERB, "Pre-parsing file %s to generate ordered index...\n", source);
+	JANUS_LOG(LOG_VERB, "Pre-parsing file %s to generate ordered index...\n", filename);
 	gboolean parsed_header = FALSE;
 	int bytes = 0;
 	long offset = 0;
@@ -361,7 +372,7 @@ static int janus_play_generate_offer(janus_play_recording *rec) {
 	/* Prepare an SDP offer we'll send to playout viewers */
 	gboolean offer_audio = (rec->arc_file != NULL && rec->acodec != JANUS_AUDIOCODEC_NONE);
 	char s_name[100];
-	g_snprintf(s_name, sizeof(s_name), "Recording %" SCNu64, rec->id);
+	g_snprintf(s_name, sizeof(s_name), "Recording %s", rec->id);
 	guint8 mid_ext_id = 1;
 	while(mid_ext_id == rec->audiolevel_ext_id)
 		mid_ext_id++;
@@ -403,6 +414,47 @@ static void janus_play_message_free(janus_play_message *msg) {
 	msg->jsep = NULL;
 
 	g_free(msg);
+}
+
+static janus_play_recording* create_recording(
+	const char* id,
+	const char* file_path)
+{
+	janus_play_recording *rec = (janus_play_recording *)g_malloc0(sizeof(janus_play_recording));
+	rec->id = g_strdup(id);
+	if(file_path) {
+		rec->arc_file = g_strdup(file_path);
+		/* Check which codec is in this recording (and if it's end-to-end encrypted) */
+		gboolean e2ee = FALSE;
+		char fmtp[256];
+		fmtp[0] = '\0';
+		rec->acodec = janus_audiocodec_from_name(janus_play_parse_codec(
+			rec->arc_file, fmtp, sizeof(fmtp), &rec->audiolevel_ext_id, &rec->opusred_pt, &e2ee));
+		if(strlen(fmtp) > 0)
+			rec->afmtp = g_strdup(fmtp);
+		if(e2ee)
+			rec->e2ee = TRUE;
+	}
+	rec->audio_pt = AUDIO_PT;
+	if(rec->opusred_pt > 0 && rec->audio_pt == rec->opusred_pt)
+		rec->audio_pt++;
+	if(rec->acodec != JANUS_AUDIOCODEC_NONE) {
+		/* Some audio codecs have a fixed payload type that we can't mess with */
+		if(rec->acodec == JANUS_AUDIOCODEC_PCMU)
+			rec->audio_pt = 0;
+		else if(rec->acodec == JANUS_AUDIOCODEC_PCMA)
+			rec->audio_pt = 8;
+		else if(rec->acodec == JANUS_AUDIOCODEC_G722)
+			rec->audio_pt = 9;
+	}
+	if(janus_play_generate_offer(rec) < 0) {
+		JANUS_LOG(LOG_WARN, "Could not generate offer for recording \"%s\"...\n", rec->id);
+	}
+	g_atomic_int_set(&rec->destroyed, 0);
+	g_atomic_int_set(&rec->completed, 1);
+	janus_refcount_init(&rec->ref, janus_play_recording_free);
+
+	return rec;
 }
 
 
@@ -475,8 +527,6 @@ int janus_play_init(janus_callbacks *callback, const char *config_path) {
 			return -1;	/* No point going on... */
 		}
 	}
-	recordings = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, (GDestroyNotify)janus_play_recording_destroy);
-	janus_play_update_recordings_list();
 
 	sessions = g_hash_table_new_full(NULL, NULL, NULL, (GDestroyNotify)janus_play_session_destroy);
 	messages = g_async_queue_new_full((GDestroyNotify) janus_play_message_free);
@@ -513,8 +563,6 @@ void janus_play_destroy(void) {
 	janus_mutex_lock(&sessions_mutex);
 	g_hash_table_destroy(sessions);
 	sessions = NULL;
-	g_hash_table_destroy(recordings);
-	recordings = NULL;
 	janus_mutex_unlock(&sessions_mutex);
 	g_async_queue_unref(messages);
 	messages = NULL;
@@ -620,8 +668,7 @@ json_t *janus_play_query_session(janus_plugin_session *handle) {
 	json_object_set_new(info, "type", json_string(session->recording ? "player" : "none"));
 	if(session->recording) {
 		janus_refcount_increase(&session->recording->ref);
-		json_object_set_new(info, "recording_id", json_integer(session->recording->id));
-		json_object_set_new(info, "recording_name", json_string(session->recording->name));
+		json_object_set_new(info, "recording_id", json_string(session->recording->id));
 		if(session->recording->e2ee)
 			json_object_set_new(info, "e2ee", json_true());
 		janus_refcount_decrease(&session->recording->ref);
@@ -912,9 +959,10 @@ static void *janus_play_handler(void *data) {
 			json_t *restart = json_object_get(root, "restart");
 			gboolean do_restart = restart ? json_is_true(restart) : FALSE;
 			/* Check if this is a new playout, or if an update is taking place (i.e., ICE restart) */
-			guint64 id_value = 0;
+			gchar_ptr id_value;
 			janus_play_recording *rec = NULL;
 			const char *warning = NULL;
+			gchar_ptr recording_file;
 			if(sdp_update || do_restart) {
 				/* Renegotiation: make sure the user provided an offer, and send answer */
 				JANUS_LOG(LOG_VERB, "Request to perform an ICE restart on existing playout\n");
@@ -925,7 +973,7 @@ static void *janus_play_handler(void *data) {
 					goto error;
 				}
 				rec = session->recording;
-				id_value = rec->id;
+				id_value.reset(g_strdup(rec->id));
 				session->sdp_version++;		/* This needs to be increased when it changes */
 				sdp_update = TRUE;
 				e2ee = rec->e2ee;
@@ -946,13 +994,14 @@ static void *janus_play_handler(void *data) {
 			}
 			/* If we got here, it's a new playout */
 			json_t *id; id = json_object_get(root, "id");
-			id_value = json_integer_value(id);
-			/* Look for this recording */
-			janus_mutex_lock(&recordings_mutex);
-			rec = (janus_play_recording *)g_hash_table_lookup(recordings, &id_value);
-			if(rec != NULL)
-				janus_refcount_increase(&rec->ref);
-			janus_mutex_unlock(&recordings_mutex);
+			id_value.reset(g_strdup(json_string_value(id)));
+
+			recording_file = build_recording_file_path(recordings_path, id_value.get());
+
+			if(recording_file) {
+				rec = create_recording(0, recording_file.get());
+			}
+
 			if(rec == NULL || rec->offer == NULL || g_atomic_int_get(&rec->destroyed)) {
 				if(rec != NULL)
 					janus_refcount_decrease(&rec->ref);
@@ -977,7 +1026,6 @@ static void *janus_play_handler(void *data) {
 			if(rec->opusred_pt > 0)
 				session->opusred = TRUE;	/* Assume the user does support RED, if it's in the recording */
 			session->recording = rec;
-			rec->viewers = g_list_append(rec->viewers, session);
 			e2ee = rec->e2ee;
 			/* Send this viewer the prepared offer  */
 			sdp = g_strdup(rec->offer);
@@ -986,14 +1034,14 @@ playdone:
 			/* Done! */
 			result = json_object();
 			json_object_set_new(result, "status", json_string(sdp_update ? "restarting" : "preparing"));
-			json_object_set_new(result, "id", json_integer(id_value));
+			json_object_set_new(result, "id", json_string(id_value.get()));
 			if(warning)
 				json_object_set_new(result, "warning", json_string(warning));
 			/* Also notify event handlers */
 			if(!sdp_update && notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
 				json_object_set_new(info, "event", json_string("playout"));
-				json_object_set_new(info, "id", json_integer(id_value));
+				json_object_set_new(info, "id", json_string(id_value.get()));
 				json_object_set_new(info, "audio", session->aframes ? json_true() : json_false());
 				gateway->notify_event(&janus_play_plugin, session->handle, info);
 			}
@@ -1020,7 +1068,7 @@ playdone:
 			if(notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
 				json_object_set_new(info, "event", json_string("playing"));
-				json_object_set_new(info, "id", json_integer(session->recording->id));
+				json_object_set_new(info, "id", json_string(session->recording->id));
 				gateway->notify_event(&janus_play_plugin, session->handle, info);
 			}
 		} else if(!strcasecmp(request_text, "stop")) {
@@ -1028,13 +1076,13 @@ playdone:
 			result = json_object();
 			json_object_set_new(result, "status", json_string("stopped"));
 			if(session->recording) {
-				json_object_set_new(result, "id", json_integer(session->recording->id));
+				json_object_set_new(result, "id", json_string(session->recording->id));
 				/* Also notify event handlers */
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
 					json_object_set_new(info, "event", json_string("stopped"));
 					if(session->recording)
-						json_object_set_new(info, "id", json_integer(session->recording->id));
+						json_object_set_new(info, "id", json_string(session->recording->id));
 					gateway->notify_event(&janus_play_plugin, session->handle, info);
 				}
 			}
@@ -1093,165 +1141,19 @@ error:
 	return NULL;
 }
 
-void janus_play_update_recordings_list(void) {
-	if(recordings_path == NULL)
-		return;
-	JANUS_LOG(LOG_VERB, "Updating recordings list in %s\n", recordings_path);
-	janus_mutex_lock(&recordings_mutex);
-	/* First of all, let's keep track of which recordings are currently available */
-	GList *old_recordings = NULL;
-	if(recordings != NULL && g_hash_table_size(recordings) > 0) {
-		GHashTableIter iter;
-		gpointer value;
-		g_hash_table_iter_init(&iter, recordings);
-		while(g_hash_table_iter_next(&iter, NULL, &value)) {
-			janus_play_recording *rec = (janus_play_recording *)value;
-			if(rec) {
-				janus_refcount_increase(&rec->ref);
-				old_recordings = g_list_append(old_recordings, &rec->id);
-			}
-		}
-	}
-	/* Open dir */
-	DIR *dir = opendir(recordings_path);
-	if(!dir) {
-		JANUS_LOG(LOG_ERR, "Couldn't open folder...\n");
-		g_list_free(old_recordings);
-		janus_mutex_unlock(&recordings_mutex);
-		return;
-	}
-	struct dirent *recent = NULL;
-	char recpath[1024];
-	while((recent = readdir(dir))) {
-		int len = strlen(recent->d_name);
-		if(len < 4)
-			continue;
-		if(strcasecmp(recent->d_name+len-4, ".nfo"))
-			continue;
-		JANUS_LOG(LOG_VERB, "Importing recording '%s'...\n", recent->d_name);
-		memset(recpath, 0, 1024);
-		g_snprintf(recpath, 1024, "%s/%s", recordings_path, recent->d_name);
-		janus_config *nfo = janus_config_parse(recpath);
-		if(nfo == NULL) {
-			JANUS_LOG(LOG_ERR, "Invalid recording '%s'...\n", recent->d_name);
-			continue;
-		}
-		GList *cl = janus_config_get_categories(nfo, NULL);
-		if(cl == NULL || cl->data == NULL) {
-			JANUS_LOG(LOG_WARN, "No recording info in '%s', skipping...\n", recent->d_name);
-			janus_config_destroy(nfo);
-			continue;
-		}
-		janus_config_category *cat = (janus_config_category *)cl->data;
-		guint64 id = g_ascii_strtoull(cat->name, NULL, 0);
-		if(id == 0) {
-			JANUS_LOG(LOG_WARN, "Invalid ID, skipping...\n");
-			g_list_free(cl);
-			janus_config_destroy(nfo);
-			continue;
-		}
-		janus_play_recording *rec = (janus_play_recording *)g_hash_table_lookup(recordings, &id);
-		if(rec != NULL) {
-			JANUS_LOG(LOG_VERB, "Skipping recording with ID %" SCNu64 ", it's already in the list...\n", id);
-			g_list_free(cl);
-			janus_config_destroy(nfo);
-			/* Mark that we updated this recording */
-			old_recordings = g_list_remove(old_recordings, &rec->id);
-			janus_refcount_decrease(&rec->ref);
-			continue;
-		}
-		janus_config_item *name = janus_config_get(nfo, cat, janus_config_type_item, "name");
-		janus_config_item *date = janus_config_get(nfo, cat, janus_config_type_item, "date");
-		janus_config_item *audio = janus_config_get(nfo, cat, janus_config_type_item, "audio");
-		if(!name || !name->value || strlen(name->value) == 0 || !date || !date->value || strlen(date->value) == 0) {
-			JANUS_LOG(LOG_WARN, "Invalid info for recording %" SCNu64 ", skipping...\n", id);
-			g_list_free(cl);
-			janus_config_destroy(nfo);
-			continue;
-		}
-		if((!audio || !audio->value)) {
-			JANUS_LOG(LOG_WARN, "No audio in recording %" SCNu64 ", skipping...\n", id);
-			janus_config_destroy(nfo);
-			continue;
-		}
-		rec = (janus_play_recording *)g_malloc0(sizeof(janus_play_recording));
-		rec->id = id;
-		rec->name = g_strdup(name->value);
-		rec->date = g_strdup(date->value);
-		if(audio && audio->value) {
-			rec->arc_file = g_strdup(audio->value);
-			char *ext = strstr(rec->arc_file, ".mjr");
-			if(ext != NULL)
-				*ext = '\0';
-			/* Check which codec is in this recording (and if it's end-to-end encrypted) */
-			gboolean e2ee = FALSE;
-			char fmtp[256];
-			fmtp[0] = '\0';
-			rec->acodec = janus_audiocodec_from_name(janus_play_parse_codec(recordings_path,
-				rec->arc_file, fmtp, sizeof(fmtp), &rec->audiolevel_ext_id, &rec->opusred_pt, &e2ee));
-			if(strlen(fmtp) > 0)
-				rec->afmtp = g_strdup(fmtp);
-			if(e2ee)
-				rec->e2ee = TRUE;
-		}
-		rec->audio_pt = AUDIO_PT;
-		if(rec->opusred_pt > 0 && rec->audio_pt == rec->opusred_pt)
-			rec->audio_pt++;
-		if(rec->acodec != JANUS_AUDIOCODEC_NONE) {
-			/* Some audio codecs have a fixed payload type that we can't mess with */
-			if(rec->acodec == JANUS_AUDIOCODEC_PCMU)
-				rec->audio_pt = 0;
-			else if(rec->acodec == JANUS_AUDIOCODEC_PCMA)
-				rec->audio_pt = 8;
-			else if(rec->acodec == JANUS_AUDIOCODEC_G722)
-				rec->audio_pt = 9;
-		}
-		rec->viewers = NULL;
-		if(janus_play_generate_offer(rec) < 0) {
-			JANUS_LOG(LOG_WARN, "Could not generate offer for recording %" SCNu64 "...\n", rec->id);
-		}
-		g_atomic_int_set(&rec->destroyed, 0);
-		g_atomic_int_set(&rec->completed, 1);
-		janus_refcount_init(&rec->ref, janus_play_recording_free);
-		janus_mutex_init(&rec->mutex);
+janus_play_frame_packet *janus_play_get_frames(const char* recordings_dir, const char* file_path) {
+	if(!recordings_dir || !file_path)
+		return nullptr;
 
-		g_list_free(cl);
-		janus_config_destroy(nfo);
-
-		/* Add to the list of recordings */
-		g_hash_table_insert(recordings, janus_uint64_dup(rec->id), rec);
+	if(!g_path_is_absolute(recordings_dir)) {
+		JANUS_LOG(LOG_ERR, "Recordings path is not absolute: %s.\n", recordings_dir);
+		return nullptr;
 	}
-	closedir(dir);
-	/* Now let's check if any of the previously existing recordings was removed */
-	if(old_recordings != NULL) {
-		while(old_recordings != NULL) {
-			guint64 id = *((guint64 *)old_recordings->data);
-			JANUS_LOG(LOG_VERB, "Recording %" SCNu64 " is not available anymore, removing...\n", id);
-			janus_play_recording *old_rec = (janus_play_recording *)g_hash_table_lookup(recordings, &id);
-			if(old_rec != NULL) {
-				/* Remove it */
-				g_hash_table_remove(recordings, &id);
-				janus_refcount_decrease(&old_rec->ref);
-			}
-			old_recordings = old_recordings->next;
-		}
-		g_list_free(old_recordings);
-	}
-	janus_mutex_unlock(&recordings_mutex);
-}
 
-janus_play_frame_packet *janus_play_get_frames(const char *dir, const char *filename) {
-	if(!dir || !filename)
-		return NULL;
 	/* Open the file */
-	char source[1024];
-	if(strstr(filename, ".mjr"))
-		g_snprintf(source, 1024, "%s/%s", dir, filename);
-	else
-		g_snprintf(source, 1024, "%s/%s.mjr", dir, filename);
-	FILE *file = fopen(source, "rb");
+	FILE *file = fopen(file_path, "rb");
 	if(file == NULL) {
-		JANUS_LOG(LOG_ERR, "Could not open file %s\n", source);
+		JANUS_LOG(LOG_ERR, "Could not open file %s\n", file_path);
 		return NULL;
 	}
 	fseek(file, 0L, SEEK_END);
@@ -1260,7 +1162,7 @@ janus_play_frame_packet *janus_play_get_frames(const char *dir, const char *file
 	JANUS_LOG(LOG_VERB, "File is %zu bytes\n", fsize);
 
 	/* Pre-parse */
-	JANUS_LOG(LOG_VERB, "Pre-parsing file %s to generate ordered index...\n", source);
+	JANUS_LOG(LOG_VERB, "Pre-parsing file %s to generate ordered index...\n", file_path);
 	gboolean parsed_header = FALSE;
 	int bytes = 0;
 	long offset = 0;
@@ -1583,16 +1485,11 @@ static void *janus_play_playout_thread(void *sessiondata) {
 			g_thread_unref(g_thread_self());
 			return NULL;
 		}
-		char source[1024];
-		if(strstr(rec->arc_file, ".mjr"))
-			g_snprintf(source, 1024, "%s/%s", recordings_path, rec->arc_file);
-		else
-			g_snprintf(source, 1024, "%s/%s.mjr", recordings_path, rec->arc_file);
-		afile = fopen(source, "rb");
+		afile = fopen(rec->arc_file, "rb");
 		if(afile == NULL) {
 			janus_refcount_decrease(&rec->ref);
 			janus_refcount_decrease(&session->ref);
-			JANUS_LOG(LOG_ERR, "Could not open audio file %s, can't start playout thread...\n", source);
+			JANUS_LOG(LOG_ERR, "Could not open audio file %s, can't start playout thread...\n", rec->arc_file);
 			g_thread_unref(g_thread_self());
 			return NULL;
 		}
@@ -1739,11 +1636,6 @@ static void *janus_play_playout_thread(void *sessiondata) {
 	if(afile)
 		fclose(afile);
 	afile = NULL;
-
-	/* Remove from the list of viewers */
-	janus_mutex_lock(&rec->mutex);
-	rec->viewers = g_list_remove(rec->viewers, session);
-	janus_mutex_unlock(&rec->mutex);
 
 	/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
 	gateway->close_pc(session->handle);
