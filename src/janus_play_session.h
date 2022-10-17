@@ -20,7 +20,6 @@ struct janus_play_session {
 	gboolean active;
 	gboolean firefox;		/* We send Firefox users a different kind of FIR */
 	janus_play_recording *recording;
-	janus_play_frame_packet *aframes;	/* Audio frames (for playout) */
 	gboolean opusred;		/* Whether this user supports RED for audio (for playout) */
 	janus_rtp_switching_context context;
 	gint hangingup;

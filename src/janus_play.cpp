@@ -31,6 +31,7 @@ extern "C" {
 #include "janus_play_recording.h"
 #include "janus_play_frame_packet.h"
 #include "janus_play_session.h"
+#include "recording_reader.h"
 using namespace play;
 
 
@@ -716,19 +717,6 @@ static void *janus_play_handler(void *data) {
 				g_snprintf(error_cause, 512, "No such recording");
 				goto error;
 			}
-			/* Access the frames */
-			if(rec->arc_file) {
-				session->aframes = janus_play_get_frames(recordings_path, rec->arc_file);
-				if(session->aframes == NULL) {
-					JANUS_LOG(LOG_WARN, "Error opening audio recording, trying to go on anyway\n");
-					warning = "Broken audio file, playing video only";
-				}
-			}
-			if(session->aframes == NULL) {
-				error_code = JANUS_PLAY_ERROR_INVALID_RECORDING;
-				g_snprintf(error_cause, 512, "Error opening recording files");
-				goto error;
-			}
 			if(rec->opusred_pt > 0)
 				session->opusred = TRUE;	/* Assume the user does support RED, if it's in the recording */
 			session->recording = rec;
@@ -748,16 +736,9 @@ playdone:
 				json_t *info = json_object();
 				json_object_set_new(info, "event", json_string("playout"));
 				json_object_set_new(info, "id", json_string(id_value.get()));
-				json_object_set_new(info, "audio", session->aframes ? json_true() : json_false());
 				gateway->notify_event(&janus_play_plugin, session->handle, info);
 			}
 		} else if(!strcasecmp(request_text, "start")) {
-			if(!session->aframes) {
-				JANUS_LOG(LOG_ERR, "Not a playout session, can't start\n");
-				error_code = JANUS_PLAY_ERROR_INVALID_STATE;
-				g_snprintf(error_cause, 512, "Not a playout session, can't start");
-				goto error;
-			}
 			/* Just a final message we make use of, e.g., to receive an ANSWER to our OFFER for a playout */
 			if(!msg_sdp) {
 				JANUS_LOG(LOG_ERR, "Missing SDP answer\n");
@@ -862,73 +843,143 @@ static void *janus_play_playout_thread(void *sessiondata) {
 	}
 	janus_refcount_increase(&session->recording->ref);
 	janus_play_recording *rec = session->recording;
-	if(!session->aframes) {
+
+	JANUS_LOG(LOG_VERB, "Joining playout thread\n");
+
+	/* Open the files */
+	if(rec->arc_file == NULL) {
 		janus_refcount_decrease(&rec->ref);
 		janus_refcount_decrease(&session->ref);
-		JANUS_LOG(LOG_ERR, "No audio frames, can't start playout thread...\n");
+		JANUS_LOG(LOG_ERR, "The recording session contains some audio packets but seems to lack a recording file name\n");
 		g_thread_unref(g_thread_self());
 		return NULL;
 	}
-	JANUS_LOG(LOG_VERB, "Joining playout thread\n");
-	/* Open the files */
-	FILE *afile = NULL;
-	if(session->aframes) {
-		if(rec->arc_file == NULL) {
-			janus_refcount_decrease(&rec->ref);
-			janus_refcount_decrease(&session->ref);
-			JANUS_LOG(LOG_ERR, "The recording session contains some audio packets but seems to lack a recording file name\n");
-			g_thread_unref(g_thread_self());
-			return NULL;
-		}
-		afile = fopen(rec->arc_file, "rb");
-		if(afile == NULL) {
-			janus_refcount_decrease(&rec->ref);
-			janus_refcount_decrease(&session->ref);
-			JANUS_LOG(LOG_ERR, "Could not open audio file %s, can't start playout thread...\n", rec->arc_file);
-			g_thread_unref(g_thread_self());
-			return NULL;
-		}
+
+	recording_reader reader;
+	if(!reader.open(rec->arc_file)) {
+		janus_refcount_decrease(&rec->ref);
+		janus_refcount_decrease(&session->ref);
+		JANUS_LOG(LOG_ERR, "Could not open audio file %s, can't start playout thread...\n", rec->arc_file);
+		g_thread_unref(g_thread_self());
+		return NULL;
 	}
+
 	/* Timer */
-	gboolean asent = FALSE;
 	struct timeval now, abefore;
 	time_t d_s, d_us;
 	gettimeofday(&now, NULL);
 	gettimeofday(&abefore, NULL);
 
-	janus_play_frame_packet *audio = session->aframes;
-	char *buffer = (char *)g_malloc0(1500);
-	int bytes = 0;
 	int64_t ts_diff = 0, passed = 0;
 
-	int audio_pt = session->recording->audio_pt;
+	const int audio_pt = session->recording->audio_pt;
 
 	int akhz = 48;
 	if(audio_pt == 0 || audio_pt == 8 || audio_pt == 9)
 		akhz = 8;
 
-	while(!g_atomic_int_get(&session->destroyed) && session->active
-			&& !g_atomic_int_get(&rec->destroyed) && audio) {
-		if(!asent) {
+	bool needs_sleep = false;
+	unsigned eof_count = 0;
+	const unsigned eof_sleep_time = 20; // milliseconds
+	const unsigned max_eof_count = 1000 / eof_sleep_time; // 1 second
+	while(!g_atomic_int_get(&session->destroyed) && session->active && !g_atomic_int_get(&rec->destroyed)) {
+		if(needs_sleep) {
 			/* We skipped the last round, so sleep a bit (5ms) */
 			g_usleep(5000);
+		} else {
+			recording_reader::read_result read_result = reader.read_next_packet();
+
+			if(read_result == recording_reader::read_result::eof) {
+				++eof_count;
+				if(eof_count >= max_eof_count) {
+					JANUS_LOG(LOG_ERR, "Recording \"%s\" didn't grow for too long time. Terminating playout...\n", rec->arc_file);
+					break;
+				} else {
+					g_usleep(eof_sleep_time * 1000);
+					continue;
+				}
+			} else if(read_result != recording_reader::read_result::success) {
+				break;
+			}
 		}
-		asent = FALSE;
-		if(audio) {
-			if(audio == session->aframes) {
-				/* First packet, send now */
-				fseek(afile, audio->offset, SEEK_SET);
-				bytes = fread(buffer, sizeof(char), audio->len, afile);
-				if(bytes != audio->len)
-					JANUS_LOG(LOG_WARN, "Didn't manage to read all the bytes we needed (%d < %d)...\n", bytes, audio->len);
+
+		needs_sleep = false;
+		eof_count = 0;
+
+		recording_packet& packet = reader.last_packet();
+
+		if(!reader.prev_packet_header()) {
+			/* Update payload type */
+			janus_rtp_header *rtp = &packet.header();
+			if(rec->opusred_pt == 0 || rtp->type != rec->opusred_pt)
+				rtp->type = audio_pt;
+
+			/* If the recording contains RED but the user doesn't support it, only use the primary data */
+			if(rec->opusred_pt > 0 && rtp->type == rec->opusred_pt && !session->opusred) {
+				int plen = 0;
+				char *payload = janus_rtp_payload(packet.packet.data(), packet.packet.size(), &plen);
+				if(payload && plen > 0) {
+					GList *blocks = janus_red_parse_blocks(payload, plen);
+					if(blocks != NULL) {
+						/* Copy the last block (primary data) to the RTP payload */
+						GList *last = g_list_last(blocks);
+						janus_red_block *rb = (janus_red_block *)(last ? last->data : NULL);
+						if(rb && rb->data && rb->length > 0) {
+							rtp->type = audio_pt;
+							memmove(payload, rb->data, rb->length);
+							packet.packet.resize(packet.packet.size() - (plen - rb->length));
+						}
+						g_list_free_full(blocks, (GDestroyNotify)g_free);
+					}
+				}
+			}
+			janus_plugin_rtp prtp =
+				{
+					.mindex = -1,
+					.video = FALSE,
+					.buffer = packet.packet.data(),
+					.length = (uint16_t)packet.packet.size()
+				};
+			janus_plugin_rtp_extensions_reset(&prtp.extensions);
+			gateway->relay_rtp(session->handle, &prtp);
+			gettimeofday(&now, NULL);
+			abefore.tv_sec = now.tv_sec;
+			abefore.tv_usec = now.tv_usec;
+		} else {
+			const play::rtp_header& prev_packet_header = reader.prev_packet_header().value();
+
+			/* What's the timestamp skip from the previous packet? */
+			ts_diff = packet.header().rtp_timestamp() - prev_packet_header.rtp_timestamp();
+			ts_diff = (ts_diff*1000)/akhz;
+			/* Check if it's time to send */
+			gettimeofday(&now, NULL);
+			d_s = now.tv_sec - abefore.tv_sec;
+			d_us = now.tv_usec - abefore.tv_usec;
+			if(d_us < 0) {
+				d_us += 1000000;
+				--d_s;
+			}
+			passed = d_s*1000000 + d_us;
+			if(passed >= (ts_diff - 5000)) {
+				/* Update the reference time */
+				abefore.tv_usec += ts_diff % 1000000;
+				if(abefore.tv_usec > 1000000) {
+					abefore.tv_sec++;
+					abefore.tv_usec -= 1000000;
+				}
+				if(ts_diff / 1000000 > 0) {
+					abefore.tv_sec += ts_diff / 1000000;
+					abefore.tv_usec -= ts_diff / 1000000;
+				}
+
 				/* Update payload type */
-				janus_rtp_header *rtp = (janus_rtp_header *)buffer;
+				janus_rtp_header *rtp = &packet.header();
 				if(rec->opusred_pt == 0 || rtp->type != rec->opusred_pt)
 					rtp->type = audio_pt;
 				/* If the recording contains RED but the user doesn't support it, only use the primary data */
 				if(rec->opusred_pt > 0 && rtp->type == rec->opusred_pt && !session->opusred) {
 					int plen = 0;
-					char *payload = janus_rtp_payload(buffer, bytes, &plen);
+					char *payload = janus_rtp_payload(packet.packet.data(), packet.packet.size(), &plen);
 					if(payload && plen > 0) {
 						GList *blocks = janus_red_parse_blocks(payload, plen);
 						if(blocks != NULL) {
@@ -937,100 +988,27 @@ static void *janus_play_playout_thread(void *sessiondata) {
 							janus_red_block *rb = (janus_red_block *)(last ? last->data : NULL);
 							if(rb && rb->data && rb->length > 0) {
 								rtp->type = audio_pt;
-								bytes -= (plen - rb->length);
 								memmove(payload, rb->data, rb->length);
+								packet.packet.resize(packet.packet.size() - (plen - rb->length));
 							}
 							g_list_free_full(blocks, (GDestroyNotify)g_free);
 						}
 					}
 				}
-				janus_plugin_rtp prtp = { .mindex = -1, .video = FALSE, .buffer = (char *)buffer, .length = (uint16_t)bytes };
+				janus_plugin_rtp prtp =
+					{
+						.mindex = -1,
+						.video = FALSE,
+						.buffer = packet.packet.data(),
+						.length = (uint16_t)packet.packet.size()
+					};
 				janus_plugin_rtp_extensions_reset(&prtp.extensions);
 				gateway->relay_rtp(session->handle, &prtp);
-				gettimeofday(&now, NULL);
-				abefore.tv_sec = now.tv_sec;
-				abefore.tv_usec = now.tv_usec;
-				asent = TRUE;
-				audio = audio->next;
 			} else {
-				/* What's the timestamp skip from the previous packet? */
-				ts_diff = audio->ts - audio->prev->ts;
-				ts_diff = (ts_diff*1000)/akhz;
-				/* Check if it's time to send */
-				gettimeofday(&now, NULL);
-				d_s = now.tv_sec - abefore.tv_sec;
-				d_us = now.tv_usec - abefore.tv_usec;
-				if(d_us < 0) {
-					d_us += 1000000;
-					--d_s;
-				}
-				passed = d_s*1000000 + d_us;
-				if(passed < (ts_diff-5000)) {
-					asent = FALSE;
-				} else {
-					/* Update the reference time */
-					abefore.tv_usec += ts_diff%1000000;
-					if(abefore.tv_usec > 1000000) {
-						abefore.tv_sec++;
-						abefore.tv_usec -= 1000000;
-					}
-					if(ts_diff/1000000 > 0) {
-						abefore.tv_sec += ts_diff/1000000;
-						abefore.tv_usec -= ts_diff/1000000;
-					}
-					/* Send now */
-					fseek(afile, audio->offset, SEEK_SET);
-					bytes = fread(buffer, sizeof(char), audio->len, afile);
-					if(bytes != audio->len)
-						JANUS_LOG(LOG_WARN, "Didn't manage to read all the bytes we needed (%d < %d)...\n", bytes, audio->len);
-					/* Update payload type */
-					janus_rtp_header *rtp = (janus_rtp_header *)buffer;
-					if(rec->opusred_pt == 0 || rtp->type != rec->opusred_pt)
-						rtp->type = audio_pt;
-					/* If the recording contains RED but the user doesn't support it, only use the primary data */
-					if(rec->opusred_pt > 0 && rtp->type == rec->opusred_pt && !session->opusred) {
-						int plen = 0;
-						char *payload = janus_rtp_payload(buffer, bytes, &plen);
-						if(payload && plen > 0) {
-							GList *blocks = janus_red_parse_blocks(payload, plen);
-							if(blocks != NULL) {
-								/* Copy the last block (primary data) to the RTP payload */
-								GList *last = g_list_last(blocks);
-								janus_red_block *rb = (janus_red_block *)(last ? last->data : NULL);
-								if(rb && rb->data && rb->length > 0) {
-									rtp->type = audio_pt;
-									bytes -= (plen - rb->length);
-									memmove(payload, rb->data, rb->length);
-								}
-								g_list_free_full(blocks, (GDestroyNotify)g_free);
-							}
-						}
-					}
-					janus_plugin_rtp prtp = { .mindex = -1, .video = FALSE, .buffer = (char *)buffer, .length = (uint16_t)bytes };
-					janus_plugin_rtp_extensions_reset(&prtp.extensions);
-					gateway->relay_rtp(session->handle, &prtp);
-					asent = TRUE;
-					audio = audio->next;
-				}
+				needs_sleep = true;
 			}
 		}
 	}
-
-	g_free(buffer);
-
-	/* Get rid of the indexes */
-	janus_play_frame_packet *tmp = NULL;
-	audio = session->aframes;
-	while(audio) {
-		tmp = audio->next;
-		g_free(audio);
-		audio = tmp;
-	}
-	session->aframes = NULL;
-
-	if(afile)
-		fclose(afile);
-	afile = NULL;
 
 	/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
 	gateway->close_pc(session->handle);
