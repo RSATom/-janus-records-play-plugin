@@ -443,15 +443,7 @@ struct janus_plugin_result *janus_play_handle_message(janus_plugin_session *hand
 	json_t *request; request = json_object_get(root, "request");
 	/* Some requests ('create' and 'destroy') can be handled synchronously */
 	const char *request_text; request_text = json_string_value(request);
-	if(!strcasecmp(request_text, "configure")) {
-		response = json_object();
-		json_object_set_new(response, "play", json_string("configure"));
-		json_object_set_new(response, "status", json_string("ok"));
-		/* Return a success, and also let the client be aware of what changed, to allow crosschecks */
-		json_t *settings = json_object();
-		json_object_set_new(response, "settings", settings);
-		goto plugin_response;
-	} else if(!strcasecmp(request_text, "play") || !strcasecmp(request_text, "start") || !strcasecmp(request_text, "stop")) {
+	if(!strcasecmp(request_text, "play") || !strcasecmp(request_text, "start") || !strcasecmp(request_text, "stop")) {
 		/* These messages are handled asynchronously */
 		janus_play_message *msg = (janus_play_message *)g_malloc(sizeof(janus_play_message));
 		msg->handle = handle;
