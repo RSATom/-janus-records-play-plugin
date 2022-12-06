@@ -11,7 +11,6 @@ SET(CMAKE_INSTALL_PREFIX ${JANUS_PREFIX})
 find_package(PkgConfig REQUIRED)
 pkg_search_module(GLIB REQUIRED glib-2.0)
 pkg_search_module(LIBJANSSON REQUIRED jansson)
-pkg_search_module(LIBOPUS REQUIRED opus)
 pkg_search_module(LIBSSL REQUIRED libssl)
 
 
@@ -39,7 +38,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${JANUS_INCLUDE_PATH}/janus/plugins/
     ${GLIB_INCLUDE_DIRS}
     ${LIBJANSSON}
-    ${LIBOPUS}
     ${LIBSSL})
 target_link_libraries(${PROJECT_NAME}
     ${GLIB_LIBRARIES})
