@@ -668,7 +668,6 @@ static void *janus_play_handler(void *data) {
 			/* Check if this is a new playout, or if an update is taking place (i.e., ICE restart) */
 			gchar_ptr id_value;
 			janus_play_recording *rec = NULL;
-			const char *warning = NULL;
 			gchar_ptr recording_file;
 			if(sdp_update || do_restart) {
 				/* Renegotiation: make sure the user provided an offer, and send answer */
@@ -729,8 +728,6 @@ playdone:
 			result = json_object();
 			json_object_set_new(result, "status", json_string(sdp_update ? "restarting" : "preparing"));
 			json_object_set_new(result, "id", json_string(id_value.get()));
-			if(warning)
-				json_object_set_new(result, "warning", json_string(warning));
 			/* Also notify event handlers */
 			if(!sdp_update && notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
