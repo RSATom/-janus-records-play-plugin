@@ -4,6 +4,7 @@
  * \copyright GNU General Public License v3
  */
 
+#include <cassert>
 #include <glib.h>
 
 extern "C" {
@@ -32,6 +33,7 @@ extern "C" {
 #include "janus_play_frame_packet.h"
 #include "janus_play_session.h"
 #include "recording_reader.h"
+#include "json_ptr.h"
 using namespace play;
 
 
@@ -578,8 +580,7 @@ static void janus_play_hangup_media_internal(janus_plugin_session *handle) {
 
 	/* Send an event to the browser and tell it's over */
 	json_t *event = json_object();
-	json_object_set_new(event, "play", json_string("event"));
-	json_object_set_new(event, "result", json_string("done"));
+	json_object_set_new(event, "play", json_string("done"));
 	int ret = gateway->push_event(handle, &janus_play_plugin, NULL, event, NULL);
 	JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (%s)\n", ret, janus_get_api_error(ret));
 	json_decref(event);
@@ -623,6 +624,7 @@ static void *janus_play_handler(void *data) {
 		}
 		janus_mutex_unlock(&sessions_mutex);
 		/* Handle request */
+		json_ptr event_ptr;
 		error_code = 0;
 		root = NULL;
 		if(msg->message == NULL) {
@@ -642,8 +644,6 @@ static void *janus_play_handler(void *data) {
 		const char *msg_sdp; msg_sdp = json_string_value(json_object_get(msg->jsep, "sdp"));
 		json_t *request; request = json_object_get(root, "request");
 		const char *request_text; request_text = json_string_value(request);
-		json_t *event; event = NULL;
-		json_t *result; result = NULL;
 		char *sdp; sdp = NULL;
 		gboolean sdp_update; sdp_update = FALSE;
 		if(json_object_get(msg->jsep, "update") != NULL)
@@ -724,10 +724,13 @@ static void *janus_play_handler(void *data) {
 			sdp = g_strdup(rec->offer);
 playdone:
 			JANUS_LOG(LOG_VERB, "Going to offer this SDP:\n%s\n", sdp);
+
 			/* Done! */
-			result = json_object();
-			json_object_set_new(result, "status", json_string(sdp_update ? "restarting" : "preparing"));
-			json_object_set_new(result, "id", json_string(id_value.get()));
+			event_ptr.reset(json_object());
+			json_t* event = event_ptr.get();
+			json_object_set_new(event, "play", json_string(sdp_update ? "restarting" : "preparing"));
+			json_object_set_new(event, "id", json_string(id_value.get()));
+
 			/* Also notify event handlers */
 			if(!sdp_update && notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
@@ -745,9 +748,12 @@ playdone:
 			}
 			if(session->opusred && strstr(msg_sdp, "red/48000/2") == NULL)
 				session->opusred = FALSE;
+
 			/* Done! */
-			result = json_object();
-			json_object_set_new(result, "status", json_string("playing"));
+			event_ptr.reset(json_object());
+			json_t* event = event_ptr.get();
+			json_object_set_new(event, "play", json_string("playing"));
+
 			/* Also notify event handlers */
 			if(notify_events && gateway->events_is_enabled()) {
 				json_t *info = json_object();
@@ -757,10 +763,12 @@ playdone:
 			}
 		} else if(!strcasecmp(request_text, "stop")) {
 			/* Done! */
-			result = json_object();
-			json_object_set_new(result, "status", json_string("stopped"));
+			event_ptr.reset(json_object());
+			json_t* event = event_ptr.get();
+			json_object_set_new(event, "play", json_string("stopped"));
+
 			if(session->recording) {
-				json_object_set_new(result, "id", json_string(session->recording->id));
+				json_object_set_new(event, "id", json_string(session->recording->id));
 				/* Also notify event handlers */
 				if(notify_events && gateway->events_is_enabled()) {
 					json_t *info = json_object();
@@ -780,14 +788,16 @@ playdone:
 		}
 
 		/* Prepare JSON event */
-		event = json_object();
-		json_object_set_new(event, "play", json_string("event"));
-		if(result != NULL)
-			json_object_set_new(event, "result", result);
+		assert(event_ptr);
+		if(!event_ptr) {
+			event_ptr.reset(json_object());
+			json_t* event = event_ptr.get();
+			json_object_set_new(event, "play", json_string("event"));
+		}
+
 		if(!sdp) {
-			int ret = gateway->push_event(msg->handle, &janus_play_plugin, msg->transaction, event, NULL);
+			int ret = gateway->push_event(msg->handle, &janus_play_plugin, msg->transaction, event_ptr.get(), NULL);
 			JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (%s)\n", ret, janus_get_api_error(ret));
-			json_decref(event);
 		} else {
 			const char *type = "offer";
 			json_t *jsep = json_pack("{ssss}", "type", type, "sdp", sdp);
@@ -798,11 +808,10 @@ playdone:
 			/* How long will the gateway take to push the event? */
 			g_atomic_int_set(&session->hangingup, 0);
 			gint64 start = janus_get_monotonic_time();
-			int res = gateway->push_event(msg->handle, &janus_play_plugin, msg->transaction, event, jsep);
+			int res = gateway->push_event(msg->handle, &janus_play_plugin, msg->transaction, event_ptr.get(), jsep);
 			JANUS_LOG(LOG_VERB, "  >> Pushing event: %d (took %" SCNu64 " us)\n",
 				res, janus_get_monotonic_time()-start);
 			g_free(sdp);
-			json_decref(event);
 			json_decref(jsep);
 		}
 		janus_play_message_free(msg);

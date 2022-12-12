@@ -22,11 +22,8 @@ prepares recording with specific `id` to play
 Will result in a `preparing` status notification (JSEP offer will be attached):
 ```
 {
-	"play" : "event",
-	"result": {
-		"status" : "preparing",
-		"id" : <unique numeric ID of the recording>
-	}
+	"play" : "preparing",
+	"id" : <unique numeric ID of the recording>
 }
 ```
 
@@ -36,17 +33,14 @@ starts playback (JSEP answer should be attached):
 
 ```
 {
-	"request" : "start",
+	"request" : "start"
 }
 ```
 
 Will result in a `playing` status:
 ```
 {
-	"play" : "event",
-	"result": {
-		"status" : "playing"
-	}
+	"play" : "playing"
 }
 ```
 
@@ -56,17 +50,14 @@ interrupts the playout process at any time, and tear the associated PeerConnecti
 
 ```
 {
-	"request" : "stop",
+	"request" : "stop"
 }
 ```
 
 Will result in a `stopped` status:
 ```
 {
-	"play" : "event",
-	"result": {
-		"status" : "stopped"
-	}
+	"play" : "stopped"
 }
 ```
 
@@ -75,7 +66,6 @@ Will result in a `stopped` status:
 If the plugin detects a loss of the associated PeerConnection, whether as a result of a `stop` request or file `EOF`/`EOS` found, a `done` result notification is triggered to inform the application the playout session is over:
 ```
 {
-	"play" : "event",
-	"result": "done"
+	"play" : "done"
 }
 ```
