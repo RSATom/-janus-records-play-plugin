@@ -199,23 +199,41 @@ janus_play_recording* create_recording(
 	const char* file_path)
 {
 	janus_play_recording *rec = (janus_play_recording *)g_malloc0(sizeof(janus_play_recording));
-	rec->id = g_strdup(id);
+
 	if(file_path) {
 		rec->arc_file = g_strdup(file_path);
+
 		/* Check which codec is in this recording (and if it's end-to-end encrypted) */
 		gboolean e2ee = FALSE;
 		char fmtp[256];
 		fmtp[0] = '\0';
-		rec->acodec = janus_audiocodec_from_name(janus_play_parse_codec(
-			rec->arc_file, fmtp, sizeof(fmtp), &rec->audiolevel_ext_id, &rec->opusred_pt, &e2ee));
+
+		const char* codecName =
+			janus_play_parse_codec(
+				rec->arc_file,
+				fmtp, sizeof(fmtp),
+				&rec->audiolevel_ext_id,
+				&rec->opusred_pt,
+				&e2ee);
+
+		if(!codecName) {
+			janus_play_recording_free(&rec->ref);
+			return nullptr;
+		}
+
+		rec->acodec = janus_audiocodec_from_name(codecName);
 		if(strlen(fmtp) > 0)
 			rec->afmtp = g_strdup(fmtp);
 		if(e2ee)
 			rec->e2ee = TRUE;
 	}
+
+	rec->id = g_strdup(id);
 	rec->audio_pt = AUDIO_PT;
+
 	if(rec->opusred_pt > 0 && rec->audio_pt == rec->opusred_pt)
 		rec->audio_pt++;
+
 	if(rec->acodec != JANUS_AUDIOCODEC_NONE) {
 		/* Some audio codecs have a fixed payload type that we can't mess with */
 		if(rec->acodec == JANUS_AUDIOCODEC_PCMU)
@@ -225,9 +243,11 @@ janus_play_recording* create_recording(
 		else if(rec->acodec == JANUS_AUDIOCODEC_G722)
 			rec->audio_pt = 9;
 	}
+
 	if(janus_play_generate_offer(rec) < 0) {
 		JANUS_LOG(LOG_WARN, "Could not generate offer for recording \"%s\"...\n", rec->id);
 	}
+
 	g_atomic_int_set(&rec->destroyed, 0);
 	g_atomic_int_set(&rec->completed, 1);
 	janus_refcount_init(&rec->ref, janus_play_recording_free);
