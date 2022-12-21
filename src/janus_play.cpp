@@ -842,6 +842,9 @@ static void *janus_play_playout_thread(void *sessiondata) {
 		return NULL;
 	}
 	if(!session->recording) {
+		/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
+		gateway->close_pc(session->handle);
+
 		janus_refcount_decrease(&session->ref);
 		JANUS_LOG(LOG_ERR, "No recording object, can't start playout thread...\n");
 		g_thread_unref(g_thread_self());
@@ -854,6 +857,9 @@ static void *janus_play_playout_thread(void *sessiondata) {
 
 	/* Open the files */
 	if(rec->arc_file == NULL) {
+		/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
+		gateway->close_pc(session->handle);
+
 		janus_refcount_decrease(&rec->ref);
 		janus_refcount_decrease(&session->ref);
 		JANUS_LOG(LOG_ERR, "The recording session contains some audio packets but seems to lack a recording file name\n");
@@ -863,6 +869,9 @@ static void *janus_play_playout_thread(void *sessiondata) {
 
 	recording_reader reader;
 	if(!reader.open(rec->arc_file)) {
+		/* Tell the core to tear down the PeerConnection, hangup_media will do the rest */
+		gateway->close_pc(session->handle);
+
 		janus_refcount_decrease(&rec->ref);
 		janus_refcount_decrease(&session->ref);
 		JANUS_LOG(LOG_ERR, "Could not open audio file %s, can't start playout thread...\n", rec->arc_file);
