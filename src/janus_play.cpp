@@ -896,7 +896,7 @@ static void *janus_play_playout_thread(void *sessiondata) {
 	bool needs_sleep = false;
 	unsigned eof_count = 0;
 	const unsigned eof_sleep_time = 20; // milliseconds
-	const unsigned max_eof_count = 1000 / eof_sleep_time; // 1 second
+	const unsigned max_eof_count = 3000 / eof_sleep_time; // 3 seconds
 	while(!g_atomic_int_get(&session->destroyed) && session->active && !g_atomic_int_get(&rec->destroyed)) {
 		if(needs_sleep) {
 			/* We skipped the last round, so sleep a bit (5ms) */
